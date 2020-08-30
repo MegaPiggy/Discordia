@@ -265,8 +265,46 @@ end
 function EventHandler.GUILD_EMOJIS_UPDATE(d, client)
 	local guild = client._guilds:get(d.guild_id)
 	if not guild then return warning(client, 'Guild', d.guild_id, 'GUILD_EMOJIS_UPDATE') end
+	local addedemoji
+	local updatedemoji,oldname
+	local deletedemoji
+	for i,v in pairs(guild._emojis) do
+		local hasemoji = false
+		for t,o in pairs(d.emojis) do
+			if o.id == v.id then
+				hasemoji = true
+			end
+		end
+		if not hasemoji then
+			deletedemoji = v
+		end
+	end
+	for i,v in pairs(d.emojis) do
+		local hasemoji
+		local emojiupdated
+		for t,o in pairs(guild._emojis) do
+			if o.id == v.id then
+				if o.name ~= v.name then
+					emojiupdated = true
+					oldname = o.name
+				end
+				hasemoji = true
+			end
+		end
+		if emojiupdated == true then
+			updatedemoji = v
+		elseif hasemoji == nil then
+			addedemoji = v
+		end
+	end
 	guild._emojis:_load(d.emojis, true)
-	return client:emit('emojisUpdate', guild)
+	if addedemoji then
+		return client:emit('emojiAdd', addedemoji, guild)
+	elseif updatedemoji then
+		return client:emit('emojiUpdate', updatedemoji, oldname, guild)
+	elseif deletedemoji then
+		return client:emit('emojiDelete', deletedemoji, guild)
+	end
 end
 
 function EventHandler.GUILD_MEMBER_ADD(d, client)
@@ -274,14 +312,14 @@ function EventHandler.GUILD_MEMBER_ADD(d, client)
 	if not guild then return warning(client, 'Guild', d.guild_id, 'GUILD_MEMBER_ADD') end
 	local member = guild._members:_insert(d)
 	guild._member_count = guild._member_count + 1
-	return client:emit('memberJoin', member)
+	return client:emit('memberJoin', member, guild)
 end
 
 function EventHandler.GUILD_MEMBER_UPDATE(d, client)
 	local guild = client._guilds:get(d.guild_id)
 	if not guild then return warning(client, 'Guild', d.guild_id, 'GUILD_MEMBER_UPDATE') end
 	local member = guild._members:_insert(d)
-	return client:emit('memberUpdate', member)
+	return client:emit('memberUpdate', member, guild)
 end
 
 function EventHandler.GUILD_MEMBER_REMOVE(d, client)
@@ -289,21 +327,21 @@ function EventHandler.GUILD_MEMBER_REMOVE(d, client)
 	if not guild then return warning(client, 'Guild', d.guild_id, 'GUILD_MEMBER_REMOVE') end
 	local member = guild._members:_remove(d)
 	guild._member_count = guild._member_count - 1
-	return client:emit('memberLeave', member)
+	return client:emit('memberLeave', member, guild)
 end
 
 function EventHandler.GUILD_ROLE_CREATE(d, client)
 	local guild = client._guilds:get(d.guild_id)
 	if not guild then return warning(client, 'Guild', d.guild_id, 'GUILD_ROLE_CREATE') end
 	local role = guild._roles:_insert(d.role)
-	return client:emit('roleCreate', role)
+	return client:emit('roleCreate', role, guild)
 end
 
 function EventHandler.GUILD_ROLE_UPDATE(d, client)
 	local guild = client._guilds:get(d.guild_id)
 	if not guild then return warning(client, 'Guild', d.guild_id, 'GUILD_ROLE_UPDATE') end
 	local role = guild._roles:_insert(d.role)
-	return client:emit('roleUpdate', role)
+	return client:emit('roleUpdate', role, guild)
 end
 
 function EventHandler.GUILD_ROLE_DELETE(d, client) -- role object not provided
@@ -311,7 +349,7 @@ function EventHandler.GUILD_ROLE_DELETE(d, client) -- role object not provided
 	if not guild then return warning(client, 'Guild', d.guild_id, 'GUILD_ROLE_DELETE') end
 	local role = guild._roles:_delete(d.role_id)
 	if not role then return warning(client, 'Role', d.role_id, 'GUILD_ROLE_DELETE') end
-	return client:emit('roleDelete', role)
+	return client:emit('roleDelete', role, guild)
 end
 
 function EventHandler.MESSAGE_CREATE(d, client)
@@ -348,14 +386,20 @@ end
 function EventHandler.MESSAGE_DELETE_BULK(d, client)
 	local channel = getChannel(client, d.channel_id)
 	if not channel then return warning(client, 'TextChannel', d.channel_id, 'MESSAGE_DELETE_BULK') end
+	local msgs = {}
 	for _, id in ipairs(d.ids) do
 		local message = channel._messages:_delete(id)
 		if message then
-			client:emit('messageDelete', message)
+			--message.id = id
+			table.insert(msgs,(#msgs+1),message)
 		else
 			client:emit('messageDeleteUncached', channel, id)
 		end
 	end
+	table.sort(msgs,function(a,b)
+		return a.id < b.id
+	end)
+	client:emit('messageDeleteBulk', msgs, channel)
 end
 
 function EventHandler.MESSAGE_REACTION_ADD(d, client)
@@ -363,11 +407,12 @@ function EventHandler.MESSAGE_REACTION_ADD(d, client)
 	if not channel then return warning(client, 'TextChannel', d.channel_id, 'MESSAGE_REACTION_ADD') end
 	local message = channel._messages:get(d.message_id)
 	if message then
+		local k = d.emoji.id ~= null and d.emoji.id or d.emoji.name
 		local reaction = message:_addReaction(d)
-		return client:emit('reactionAdd', reaction, d.user_id)
+		return client:emit('reactionAdd', reaction, channel, message, k, d.emoji, d.user_id)
 	else
 		local k = d.emoji.id ~= null and d.emoji.id or d.emoji.name
-		return client:emit('reactionAddUncached', channel, d.message_id, k, d.user_id)
+		return client:emit('reactionAddUncached', channel, d.message_id, k, d.emoji, d.user_id)
 	end
 end
 
@@ -377,14 +422,14 @@ function EventHandler.MESSAGE_REACTION_REMOVE(d, client)
 	local message = channel._messages:get(d.message_id)
 	if message then
 		local reaction = message:_removeReaction(d)
+		local k = d.emoji.id ~= null and d.emoji.id or d.emoji.name
 		if not reaction then -- uncached reaction?
-			local k = d.emoji.id ~= null and d.emoji.id or d.emoji.name
 			return warning(client, 'Reaction', k, 'MESSAGE_REACTION_REMOVE')
 		end
-		return client:emit('reactionRemove', reaction, d.user_id)
+		return client:emit('reactionRemove', reaction, channel, message, k, d.emoji, d.user_id)
 	else
 		local k = d.emoji.id ~= null and d.emoji.id or d.emoji.name
-		return client:emit('reactionRemoveUncached', channel, d.message_id, k, d.user_id)
+		return client:emit('reactionRemoveUncached', channel, d.message_id, k, d.emoji, d.user_id)
 	end
 end
 
@@ -400,7 +445,7 @@ function EventHandler.MESSAGE_REACTION_REMOVE_ALL(d, client)
 			end
 			message._reactions = nil
 		end
-		return client:emit('reactionRemoveAll', message)
+		return client:emit('reactionRemoveAll', channel, message, reactions)
 	else
 		return client:emit('reactionRemoveAllUncached', channel, d.message_id)
 	end
@@ -461,6 +506,33 @@ end
 
 function EventHandler.TYPING_START(d, client)
 	return client:emit('typingStart', d.user_id, d.channel_id, d.timestamp)
+end
+
+function EventHandler.INVITE_CREATE(d, client)
+	local channel = getChannel(client, d.channel_id)
+	local code = d.code
+	local temp = d.temporary
+	local uses = d.uses
+	local maxuses = d.max_uses
+	local maxage = d.max_age
+	local createdat = d.created_at
+	local guild = client._guilds:get(d.guild_id)
+	local inviter = d.inviter.id
+	if not channel then return warning(client, 'TextChannel', d.channel_id, 'INVITE_CREATE') end
+	if not code then return warning(client, 'Code', d.code, 'INVITE_CREATE') end
+	if not guild then return warning(client, 'Guild', d.guild_id, 'INVITE_CREATE') end
+	if not inviter then return warning(client, 'Inviter', d.inviter, 'INVITE_CREATE') end
+	return client:emit('inviteCreate',channel,code,guild,inviter,temp,uses,maxuses,maxage,createdat)
+end
+
+function EventHandler.INVITE_DELETE(d, client)
+	local channel = getChannel(client, d.channel_id)
+	local code = d.code
+	local guild = client._guilds:get(d.guild_id)
+	if not channel then return warning(client, 'TextChannel', d.channel_id, 'INVITE_DELETE') end
+	if not code then return warning(client, 'Code', d.code, 'INVITE_DELETE') end
+	if not guild then return warning(client, 'Guild', d.guild_id, 'INVITE_DELETE') end
+	return client:emit('inviteDelete',channel,code,guild)
 end
 
 function EventHandler.USER_UPDATE(d, client)
